@@ -19,6 +19,7 @@ Environment variables (required for the LLM path):
 import argparse
 import json
 import os
+from pydoc import text
 import re
 import sys
 import traceback
@@ -41,6 +42,20 @@ GERMAN_MONTHS = {
     "januar": 1, "februar": 2, "maerz": 3, "marz": 3, "märz": 3,
     "april": 4, "mai": 5, "juni": 6, "juli": 7, "august": 8,
     "september": 9, "oktober": 10, "november": 11, "dezember": 12,
+}
+
+GERMAN_MONTHS_SHORT = {
+    "jan": 1, "feb": 2, "mar": 3, "mär": 3, "mrz": 3, "apr": 4,
+    "mai": 5, "jun": 6, "jul": 7, "aug": 8, "sep": 9, "sept": 9,
+    "okt": 10, "nov": 11, "dez": 12,
+}
+
+ENGLISH_MONTHS = {
+    "jan": 1, "january": 1, "feb": 2, "february": 2,
+    "mar": 3, "march": 3, "apr": 4, "april": 4, "may": 5,
+    "jun": 6, "june": 6, "jul": 7, "july": 7, "aug": 8, "august": 8,
+    "sep": 9, "sept": 9, "september": 9, "oct": 10, "october": 10,
+    "nov": 11, "november": 11, "dec": 12, "december": 12,
 }
 
 # ------------------------------- helpers --------------------------------------
@@ -107,6 +122,92 @@ def extract_amounts_eur(text: str) -> list[float]:
             pass
     return amounts
 
+def _month_from_name(name: str) -> int | None:
+    """Look up a month number from any German or English name/abbreviation."""
+    name = name.lower().rstrip(".")
+    return (
+        GERMAN_MONTHS.get(name)
+        or GERMAN_MONTHS_SHORT.get(name)
+        or ENGLISH_MONTHS.get(name)
+    )
+
+
+def _normalise_year(y: int) -> int:
+    """Convert a 2-digit year to 4-digit (assuming 20xx)."""
+    return y + 2000 if y < 100 else y
+
+
+def find_date_near_label(text: str, label_pattern: str) -> date | None:
+    """Find the first date within ~150 chars after a label match.
+
+    Robust to realistic variations in German admin paperwork:
+      - Numeric DE:  15.10.2026  /  15.10.26  /  15. 10. 2026
+      - Written DE:  15. Oktober 2026  /  15. Okt. 26  /  15. Mrz 2026
+      - English:     22 Oct 2026  /  22nd Oct 26  /  October 22, 2026
+      - Weekday prefix ("Montag, ...") is tolerated for all forms.
+    """
+    label_match = re.search(label_pattern, text, flags=re.IGNORECASE)
+    if not label_match:
+        return None
+
+    window = text[label_match.end():label_match.end() + 60]
+
+    # Strip ordinal suffixes attached to digits so "22nd" -> "22".
+    window = re.sub(r"(\d)(st|nd|rd|th)\b", r"\1", window, flags=re.IGNORECASE)
+
+    # Try numeric (dd.mm.yy or dd.mm.yyyy) first.
+    numeric = re.search(r"(\d{1,2})\.\s*(\d{1,2})\.\s*(\d{2,4})\b", window)
+    if numeric:
+        d, m, y = (int(x) for x in numeric.groups())
+        try:
+            return date(_normalise_year(y), m, d)
+        except ValueError:
+            pass
+
+    # Try German-style "dd. Month yyyy" (short or full).
+    de_written = re.search(
+        r"(\d{1,2})\.\s*([A-Za-zÄÖÜäöüß]{3,})\.?\s*(\d{2,4})\b",
+        window,
+    )
+    if de_written:
+        d = int(de_written.group(1))
+        m = _month_from_name(de_written.group(2))
+        y = int(de_written.group(3))
+        if m:
+            try:
+                return date(_normalise_year(y), m, d)
+            except ValueError:
+                pass
+
+    # Try English "dd Month yyyy".
+    en_dmy = re.search(
+        r"(\d{1,2})\s+([A-Za-z]{3,})\.?\s+(\d{2,4})\b", window
+    )
+    if en_dmy:
+        d = int(en_dmy.group(1))
+        m = _month_from_name(en_dmy.group(2))
+        y = int(en_dmy.group(3))
+        if m:
+            try:
+                return date(_normalise_year(y), m, d)
+            except ValueError:
+                pass
+
+    # Try English "Month dd, yyyy".
+    en_mdy = re.search(
+        r"([A-Za-z]{3,})\.?\s+(\d{1,2}),?\s+(\d{2,4})\b", window
+    )
+    if en_mdy:
+        m = _month_from_name(en_mdy.group(1))
+        d = int(en_mdy.group(2))
+        y = int(en_mdy.group(3))
+        if m:
+            try:
+                return date(_normalise_year(y), m, d)
+            except ValueError:
+                pass
+
+    return None
 
 def llm_check(tracer: CaseTracer, question: str, context: str, rule_id: str):
     """Call the labeler, log it as a model_call event, return the result."""
@@ -149,9 +250,9 @@ def decide_trip(case_dir: Path, tracer: CaseTracer) -> tuple[str, str]:
     if not text:
         return REJECTED, "Application form is unreadable."
 
-    submitted = extract_date_field(text, r"Datum der Antragstellung:\s*([\d.\s]+\d{4})")
-    trip_start = extract_date_field(text, r"Start:\s*\w+,\s*([^,\n]+?\d{4})")
-    business_end = extract_date_field(text, r"Ende\s+Dienstgesch[^:]*:\s*([\d.\s]+\d{4})")
+    submitted = find_date_near_label(text, r"Datum\s+der\s+Antragstellung:")
+    trip_start = find_date_near_label(text, r"Start:")
+    business_end = find_date_near_label(text, r"Ende\s+Dienstgesch\w*(?:\s+\w+)?:")
 
     # Rule T1 - prior approval
     if submitted and trip_start and submitted > trip_start:
