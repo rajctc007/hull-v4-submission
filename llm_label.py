@@ -18,12 +18,13 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
-from openai import OpenAI
+from openai import OpenAI, APITimeoutError
 
 
 MAX_RETRIES = 2
 MAX_TOKENS = 500
 TEMPERATURE = 0
+LLM_TIMEOUT_SECONDS = 30.0
 
 
 @dataclass
@@ -40,6 +41,8 @@ def _client() -> OpenAI:
     return OpenAI(
         base_url=os.environ["OPENAI_BASE_URL"],
         api_key=os.environ["OPENAI_API_KEY"],
+        timeout=LLM_TIMEOUT_SECONDS,
+
     )
 
 
@@ -94,28 +97,36 @@ def ask_boolean(
 
     for attempt in range(MAX_RETRIES + 1):
         try:
-            response = client.chat.completions.create(
-                model=chosen_model,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                temperature=TEMPERATURE,
-                max_tokens=MAX_TOKENS,
-                reasoning_effort=reasoning_effort,
-            )
-        except TypeError:
-            # Older openai clients may not accept reasoning_effort directly.
-            response = client.chat.completions.create(
-                model=chosen_model,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                temperature=TEMPERATURE,
-                max_tokens=MAX_TOKENS,
-                extra_body={"reasoning_effort": reasoning_effort},
-            )
+            try:
+                response = client.chat.completions.create(
+                    model=chosen_model,
+                    messages=[
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                    temperature=TEMPERATURE,
+                    max_tokens=MAX_TOKENS,
+                    reasoning_effort=reasoning_effort,
+                )
+            except TypeError:
+                # Older openai clients may not accept reasoning_effort directly.
+                response = client.chat.completions.create(
+                    model=chosen_model,
+                    messages=[
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                    temperature=TEMPERATURE,
+                    max_tokens=MAX_TOKENS,
+                    extra_body={"reasoning_effort": reasoning_effort},
+                )
+        except APITimeoutError:
+            # The call did not finish within LLM_TIMEOUT_SECONDS. Record
+            # it in `raw` for the final fallback evidence, then try again
+            # if any retries remain. If all retries time out, the loop
+            # exits and the conservative False fallback below applies.
+            raw = f"[timeout after {LLM_TIMEOUT_SECONDS}s on attempt {attempt + 1}]"
+            continue
 
         msg = response.choices[0].message
         raw = msg.content or ""

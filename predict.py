@@ -195,6 +195,16 @@ UNIVERSITY_KEYWORDS = re.compile(
 )
 PROFORMA_PATTERN = re.compile(r"pro[\s-]?forma[\s-]?rechnung", flags=re.IGNORECASE)
 
+# Payment proof documents (bank/card statements, payment receipts).
+# These are NORMAL evidence that an invoice has been paid, NOT duplicate
+# billing. Their presence tells us we are looking at (invoice + payment
+# proof), so L2 duplicate_billing must be skipped.
+PAYMENT_PROOF_PATTERN = re.compile(
+    r"kontoauszug|kartenabrechnung|kreditkartenabrechnung"
+    r"|zahlungs[-_\s]?(bestaetigung|beleg|nachweis)",
+    flags=re.IGNORECASE,
+)
+
 
 def decide_expense(case_dir: Path, tracer: CaseTracer) -> tuple[str, str]:
     tracer.log("input", input={"case": case_dir.name, "type": "expense"})
@@ -224,16 +234,33 @@ def decide_expense(case_dir: Path, tracer: CaseTracer) -> tuple[str, str]:
         )
 
     # Labeler L2 - duplicate billing (same order billed twice)
-    r = llm_check(tracer, (
-        "Do the submitted invoices appear to be billing the SAME underlying "
-        "order twice? Look for duplication signals such as identical "
-        "amounts, identical item lists, identical order numbers, or "
-        "identical payment references appearing on multiple invoices."
-    ), text, rule_id="L2_duplicate_billing")
-    if r.answer:
-        tracer.log("observation", output={"rule": "L2_duplicate_billing", "fired": True})
-        return REJECTED, f"Duplicate billing detected: {r.evidence}"
+    # Pre-filter for L2: if the case contains a bank or card statement,
+    # we are looking at an invoice plus its own payment proof. That is
+    # normal expense documentation, NOT duplicate billing. Skip L2 so
+    # it does not misfire on (rechnung + kontoauszug) pairs.
+    pdfs = list(case_dir.glob("*.pdf"))
+    has_payment_proof = any(
+        PAYMENT_PROOF_PATTERN.search(p.name) for p in pdfs
+    )
 
+    if has_payment_proof:
+        tracer.log("observation", output={
+            "rule": "L2_duplicate_billing",
+            "fired": False,
+            "skipped_reason": "payment_proof_present",
+        })
+    else:
+        # Labeler L2 - duplicate billing (same order billed twice)
+        r = llm_check(tracer, (
+            "Do the submitted invoices appear to be billing the SAME underlying "
+            "order twice? Look for duplication signals such as identical "
+            "amounts, identical item lists, identical order numbers, or "
+            "identical payment references appearing on multiple invoices."
+        ), text, rule_id="L2_duplicate_billing")
+        if r.answer:
+            tracer.log("observation", output={"rule": "L2_duplicate_billing", "fired": True})
+            return REJECTED, f"Duplicate billing detected: {r.evidence}"
+        
     # Labeler L3 - internal staff hospitality
     r = llm_check(tracer, (
         "Does this receipt consist primarily of items for an in-house staff "
