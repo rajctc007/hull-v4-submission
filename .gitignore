@@ -2,3 +2,6 @@ out-*/
 env.sh
 __pycache__/
 *.pyc
+env.sh
+synthetic/synthetic_cases/
+runs/

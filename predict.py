@@ -361,6 +361,32 @@ def decide_expense(case_dir: Path, tracer: CaseTracer) -> tuple[str, str]:
             tracer.log("observation", output={"rule": "L2_duplicate_billing", "fired": True})
             return REJECTED, f"Duplicate billing detected: {r.evidence}"
         
+    # Rule E4 - HRKG hotel cost cap (VV-HRKG §8 zu Abs. 2 Nr. 2.1).
+    # Overnight costs up to 80 EUR are automatically considered 
+    # "unvermeidbar". Above 80 EUR requires justification: trade fair
+    # (Messe), metropolitan area (Grossstadt / Grossstadt-Zuschlag), 
+    # prior approval, or unforeseeable circumstances.
+    if re.search(r"\b(?:übernachtung|uebernachtung|hotel|zimmer)\b", text, flags=re.IGNORECASE):
+        hotel_amounts = extract_amounts_eur(text)
+        if hotel_amounts:
+            max_hotel = max(hotel_amounts)
+            if max_hotel > 80:
+                has_justification = re.search(
+                    r"messe|großstadt|grossstadt|genehmigt|dienstreisestelle"
+                    r"|unvermeidbar|außergewöhnlich|ausergewoehnlich",
+                    text, flags=re.IGNORECASE,
+                )
+                if not has_justification:
+                    tracer.log("observation", output={
+                        "rule": "E4_hotel_cost_cap",
+                        "fired": True,
+                        "max_amount": max_hotel,
+                    })
+                    return REJECTED, (
+                        f"Hotel cost {max_hotel:.2f} EUR exceeds HRKG VV §8 "
+                        f"80 EUR threshold without justification "
+                        f"(Messe, Grossstadt, prior approval)."
+                    )  
     # Labeler L3 - internal staff hospitality
     r = llm_check(tracer, (
         "Does this receipt consist primarily of items for an in-house staff "
