@@ -8,4 +8,4 @@ COPY event_log.py /event_log.py
 COPY predict.py /predict.py
 RUN chmod +x /predict.py
 
-ENTRYPOINT ["/predict.py"]
+ENTRYPOINT ["/bin/sh", "-c", "python /predict.py --input \"$inputDataset\" --output \"$outputDir\""]
